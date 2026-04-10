@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #f0f2f6; font-family: sans-serif; }
+  #wrapper { position: relative; width: 100%; }
+  #canvas { display: block; width: 100%; cursor: default; }
+  #hint {
+    padding: 6px 10px;
+    font-size: 12px;
+    color: #555;
+    background: #f0f2f6;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrapper">
+  <canvas id="canvas"></canvas>
+  <div id="hint">빨간 선을 위아래로 드래그하여 컷 위치를 조정하세요</div>
+</div>
+
+<script>
+// ── Streamlit 통신 ──
+window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1 }, "*");
+
+function sendValue(value) {
+  window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setComponentValue", value }, "*");
+}
+function setFrameHeight(h) {
+  window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setFrameHeight", height: h }, "*");
+}
+
+window.addEventListener("message", (e) => {
+  if (e.data.type === "streamlit:render") onRender(e.data.args);
+});
+
+// ── 상태 ──
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const HIT_ZONE = 12;     // 드래그 감지 범위 (px)
+const LINE_W   = 2;      // 라인 두께
+
+let state = { imgW: 0, imgH: 0, cuts: [], scale: 1 };
+let dragging = null;
+let imgEl = null;
+
+// ── 렌더 ──
+function onRender(args) {
+  state.imgW  = args.img_width;
+  state.imgH  = args.img_height;
+  state.cuts  = args.cut_points.slice();
+
+  const displayW = canvas.parentElement.clientWidth || 720;
+  state.scale    = displayW / state.imgW;
+  const displayH = Math.round(state.imgH * state.scale);
+
+  canvas.width  = displayW;
+  canvas.height = displayH;
+
+  setFrameHeight(displayH + 36);
+
+  imgEl = new Image();
+  imgEl.onload = draw;
+  imgEl.src = "data:image/jpeg;base64," + args.img_b64;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (imgEl) ctx.drawImage(imgEl, 0, 0, canvas.width, canvas.height);
+
+  state.cuts.forEach((y, i) => {
+    const dy = Math.round(y * state.scale);
+
+    // 라인
+    ctx.strokeStyle = "rgba(255,50,50,0.9)";
+    ctx.lineWidth   = LINE_W;
+    ctx.beginPath();
+    ctx.moveTo(0, dy);
+    ctx.lineTo(canvas.width, dy);
+    ctx.stroke();
+
+    // 레이블 배경
+    const label = ` 컷 ${i + 1}  (${y}px) `;
+    ctx.font = "bold 12px sans-serif";
+    const tw = ctx.measureText(label).width + 8;
+    ctx.fillStyle = "rgba(255,50,50,0.9)";
+    ctx.fillRect(0, dy - 22, tw, 22);
+
+    // 레이블 텍스트
+    ctx.fillStyle = "#fff";
+    ctx.fillText(label, 4, dy - 6);
+
+    // 드래그 핸들 (작은 원)
+    ctx.fillStyle   = "rgba(255,50,50,1)";
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.arc(canvas.width - 18, dy, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  });
+}
+
+// ── 유틸 ──
+function canvasY(e) {
+  return e.clientY - canvas.getBoundingClientRect().top;
+}
+function touchCanvasY(e) {
+  return e.touches[0].clientY - canvas.getBoundingClientRect().top;
+}
+function nearestLine(cy) {
+  let best = null, bestDist = HIT_ZONE + 1;
+  state.cuts.forEach((y, i) => {
+    const dy   = y * state.scale;
+    const dist = Math.abs(cy - dy);
+    if (dist < bestDist) { bestDist = dist; best = i; }
+  });
+  return best;
+}
+function clampCut(idx, newY) {
+  const minY = idx > 0 ? state.cuts[idx - 1] + 5 : 5;
+  const maxY = idx < state.cuts.length - 1 ? state.cuts[idx + 1] - 5 : state.imgH - 5;
+  return Math.max(minY, Math.min(maxY, Math.round(newY)));
+}
+
+// ── 마우스 이벤트 ──
+canvas.addEventListener("mousedown", (e) => {
+  const i = nearestLine(canvasY(e));
+  if (i !== null) { dragging = i; canvas.style.cursor = "ns-resize"; }
+});
+
+canvas.addEventListener("mousemove", (e) => {
+  const cy = canvasY(e);
+  if (dragging !== null) {
+    state.cuts[dragging] = clampCut(dragging, cy / state.scale);
+    draw();
+  } else {
+    canvas.style.cursor = nearestLine(cy) !== null ? "ns-resize" : "default";
+  }
+});
+
+canvas.addEventListener("mouseup", () => {
+  if (dragging !== null) {
+    dragging = null;
+    canvas.style.cursor = "default";
+    sendValue(state.cuts.slice());
+  }
+});
+
+canvas.addEventListener("mouseleave", () => {
+  if (dragging !== null) {
+    dragging = null;
+    sendValue(state.cuts.slice());
+  }
+});
+
+// ── 터치 이벤트 ──
+canvas.addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  const i = nearestLine(touchCanvasY(e));
+  if (i !== null) dragging = i;
+}, { passive: false });
+
+canvas.addEventListener("touchmove", (e) => {
+  e.preventDefault();
+  if (dragging === null) return;
+  state.cuts[dragging] = clampCut(dragging, touchCanvasY(e) / state.scale);
+  draw();
+}, { passive: false });
+
+canvas.addEventListener("touchend", (e) => {
+  if (dragging !== null) {
+    dragging = null;
+    sendValue(state.cuts.slice());
+  }
+});
+</script>
+</body>
+</html>
